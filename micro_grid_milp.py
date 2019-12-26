@@ -1,3 +1,4 @@
+
 # coding=utf-8
 import pandas as pd
 from pandas import DataFrame, Series
@@ -10,7 +11,7 @@ rcParams['figure.figsize'] = 20, 10
 import docplex
 from docplex.mp.environment import Environment
 env = Environment()
-env.print_information()
+# env.print_information()
 from docplex.mp.model import Model
 
 #region 設定負載與變數 參數
@@ -38,9 +39,9 @@ ESS_disch_cost=15#磨損成本係數 每MWh需要多少錢
 
 '''  '''
 #region 畫圖區域
-fig,  = plt.subplots(figsize=(10,10))
+#fig, ax = plt.subplots(figsize=(10,10))
 
-.plot(net_loadprofile,label='net_loadprofile')
+#ax.plot(net_loadprofile,label='net_loadprofile')
 nb_periods = len(net_loadprofile)
 #endregion
 print("nb periods = {}".format(nb_periods))
@@ -58,13 +59,13 @@ df_energy = DataFrame({"co2_cost": [30, 5, 15, 0]}, index=energies)
  變成表格 key 會變成row  直軸的index  每個機組的名稱 最後變成直軸是每個機組的名稱 橫軸是機組特性 (最大最小功率)
  '''
 all_units = ["diesel1"]
-
+ess_index = ["ess1"]
 ucp_raw_unit_data = {
         "energy": ["diesel"],
         "initial" : [0],
         "min_gen": [35],
-        "m_gen": [120],
-        "operating_m_gen": [120],
+        "max_gen": [120],
+        "operating_max_gen": [120],
         "min_uptime": [24],
         "min_downtime":[24],
         "ramp_up":   [120],
@@ -73,10 +74,24 @@ ucp_raw_unit_data = {
         "fixed_cost": [77],
         "variable_cost": [20],
         }
-
+ucp_raw_ess_data = {
+        "energy": ["ess"],
+        "initial" : [0],
+        "min_gen": [-100],
+        "max_gen": [100],
+        "operating_max_gen": [100],
+        "min_uptime": [0],
+        "min_downtime":[0],
+        "ramp_up":   [9999],
+        "ramp_down": [9999],
+        "start_cost": [0],
+        "fixed_cost": [0],
+        "variable_cost": [15],
+        }
 df_units = DataFrame(ucp_raw_unit_data, index=all_units)
-print(df_units.index)
-print(df_units["energy"]) #回傳名稱與直行
+ess_unit = DataFrame(ucp_raw_ess_data, index=ess_index)
+# print(df_units.index)
+# print(df_units["energy"]) #回傳名稱與直行
 
 '''
 根據clomn名稱("energy")合併兩個表格，保留右邊的index ，條列出前面5項 並且添加排碳成本 ，再額外設定Index名稱
@@ -84,7 +99,7 @@ print(df_units["energy"]) #回傳名稱與直行
 '''
 df_up = pd.merge(df_units, df_energy, left_on="energy", right_index=True)
 df_up.index.names=['units'] 
-
+ess_unit.index.names=['ess_unit'] 
 
 
 units = all_units
@@ -111,39 +126,46 @@ production = ucpm.continuous_var_matrix(keys1=units, keys2=periods, name="p")
 charge_variable = ucpm.binary_var_matrix(keys1=ess, keys2=periods, name="charge_variable")
 discharge_variable = ucpm.binary_var_matrix(keys1=ess, keys2=periods, name="discharge_variable")
     #儲能系統功率 
-ess_production = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_p")
+ess_production = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_production")
     #soc
 ess_soc = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_soc")
 #endregion 
 # 把整個優化變數的 屬性 列印出來
-ucpm.print_information()
+# ucpm.print_information()
 
 #endregion 
 
 #region 把所有的優化變數在整合成一個表格，增加兩個index，機組名稱 與時間 每個基礎每個時間的優化變數  
 df_decision_vars = DataFrame({'in_use': in_use, 'turn_on': turn_on, 'turn_off': turn_off, 'production': production})
+df_decision_vars_ess =DataFrame({'charge_variable': charge_variable,'discharge_variable' : discharge_variable,'ess_production':ess_production,'ess_soc':ess_soc})
 # Set index names
 df_decision_vars.index.names=['units', 'periods']
+df_decision_vars_ess.index.names=['ess_unit', 'periods']
 #endregion 
-# 顯示“ df_decision_vars”數據框的前幾行
+df_decision_vars_ess.head()
 
-
+#region  最大發電量最小發電量限制
 '''把df_up裡面的最大發電量最小發電量 合併過來 ，使用的方法是 join，利用共同的index  units '''
 # Create a join between 'df_decision_vars' and 'df_up' Data Frames based on common index id (ie: 'units')
 # In 'df_up', one keeps only relevant columns: 'min_gen' and 'm_gen'
-df_join_decision_vars_up = df_decision_vars.join(df_up[['min_gen', 'm_gen']], how='inner')
-
-# Display first few rows of joined Data Frames
+df_join_decision_vars_up = df_decision_vars.join(df_up[['min_gen', 'max_gen']], how='inner')
 df_join_decision_vars_up.head()
+#把電池上下功率限制 黏貼過來 
+df_join_decision_vars_ess_minmax = df_decision_vars_ess.join(ess_unit[['min_gen', 'max_gen']], how='inner')
+df_join_decision_vars_ess_minmax.head()
 
 # 功率要在最大到最小之間  疊代每個行 INDEX If True 會回傳每行的第一個 疊代每一個機組的每一個小時  
 for item in df_join_decision_vars_up.itertuples(index=False):
-    ucpm += (item.production <= item.m_gen * item.in_use)
+    ucpm += (item.production <= item.max_gen * item.in_use)
     ucpm += (item.production >= item.min_gen * item.in_use)
-        #這應該是限制式才對但是為什麼沒有
+    #這應該是限制式才對但是為什麼沒有
+for item in df_join_decision_vars_ess_minmax.itertuples(index=False):
+    ucpm += (item.ess_production <= item.max_gen * item.discharge_variable)
+    ucpm += (item.ess_soc >= SOCmin)
+    ucpm += (item.ess_soc <= SOCmax)
+#endregion 
 
-
-
+#region 初始狀態
 '''
     初始狀態   假如剛開始有功率 turn_on in_use =1
 If initial production is nonzero, then period #1 is not a turn_on
@@ -166,8 +188,8 @@ for u in units:
         ucpm.add_constraint(turn_on[u, 1] == in_use[u, 1])
         # 已經關掉了所以就不需要關掉 
         ucpm.add_constraint(turn_off[u, 1] == 0)
-ucpm.print_information()
-
+#ucpm.print_information()
+#endregion 
 '''用groupby 對於每個機組每個小時  分組 並且取出這個機組的升降載限制 初始
 還有他們的輸出功率 
 
@@ -185,16 +207,17 @@ for unit, r in df_decision_vars.groupby(level='units'): #對於不同的幾組�
         ucpm.add_constraint(p_next - p_curr <= u_ramp_up) #每1個小時的 升載限制
         ucpm.add_constraint(p_curr - p_next <= u_ramp_down) #每1個小時的 降載限制
 
-ucpm.print_information()
+#ucpm.print_information()
 
 
 # Enforcing demand 電力供需平衡 
 # use a >= here to be more robust, 
 # objective will ensure efficient production
 for period, r in df_decision_vars.groupby(level='periods'):
+
     total_demand = demand[period]
     ctname = "ct_meet_demand_%d" % period
-    ucpm.add_constraint(ucpm.sum(r.production) >= total_demand, ctname)
+    ucpm.add_constraint(ucpm.sum(r.production)+df_decision_vars_ess.loc['ess1',period].ess_production >= total_demand, ctname)
 
 '''創建了一個新的表格 包含了成本特性  設定目標函數 最小化全部的成本加在一起 
 '''
@@ -234,18 +257,18 @@ assert ucpm.solve(), "!!! Solve of the model fails" #斷定解答一定存在不
 ucpm.report()
 
 #
-df_prods = df_decision_vars.production.apply(lambda v: m(0, v.solution_value)).unstack(level='units')
-df_used = df_decision_vars.in_use.apply(lambda v: m(0, v.solution_value)).unstack(level='units')
-df_started = df_decision_vars.turn_on.apply(lambda v: m(0, v.solution_value)).unstack(level='units')
+df_prods = df_decision_vars.production.apply(lambda v: max(0, v.solution_value)).unstack(level='units')
+df_used = df_decision_vars.in_use.apply(lambda v: max(0, v.solution_value)).unstack(level='units')
+df_started = df_decision_vars.turn_on.apply(lambda v: max(0, v.solution_value)).unstack(level='units')
 
 
 # print(len(nb_periods))
 print(len(range(1, nb_periods+1)))
 print(len(df_prods))
 xx=range(nb_periods)
-.plot(df_prods,label='df_prodations')
-.set_title('milp')
+ax.plot(df_prods,label='df_prodations')
+ax.set_title('milp')
 # .bar(df_prods)
-.legend()
+ax.legend()
 #plt.plot(x,y)
 plt.show()
