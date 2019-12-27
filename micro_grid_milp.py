@@ -17,7 +17,7 @@ from docplex.mp.model import Model
 #region 設定負載與變數 參數
 ucpm = Model("ucp") #模型選擇經濟調度優化問題 The Unit Commitment Problem (UCP)
 
-loadprofile=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,109,92,85,78,66,53,42]
+loadprofile=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,150,92,85,78,66,53,42]
 pv_power_sun=[0,0,0,0,10,30,50,65,80,90,100,95,90,80,65,40,30,8,0,0,0,0,0,0]#晴天
 pv_power=Series(pv_power_sun)
 loadprofile= Series(loadprofile)
@@ -25,7 +25,7 @@ net_loadprofile=loadprofile-pv_power
 #region 儲能系統參數
 
 NOMb = 100 #標稱電池容量,單位為MWh
-NOMbInit = 30 #初始標稱電池容量,單位為MWh
+NOMbInit = 50 #初始標稱電池容量,單位為MWh
 SOCmin = 0.1 #電池充電狀態(最小)
 SOCmax =0.9
 SOC_final =0.8
@@ -59,7 +59,7 @@ all_units = ["diesel1"]
 ess_index = ["ess1"]
 ucp_raw_unit_data = {
         "energy": ["diesel"],
-        "initial" : [0],
+        "initial" : [loadprofile[0]],
         "min_gen": [35],
         "max_gen": [120],
         "operating_max_gen": [120],
@@ -229,8 +229,8 @@ for period, r in df_decision_vars.groupby(level='periods'):
     ctname = "ct_meet_demand_%d" % period
     #ucpm.add_constraint(ucpm.sum(r.production)+df_decision_vars_ess.loc['ess1',period].ess_production >= total_demand, ctname)
     ucpm.add_constraint(ucpm.sum(r.production) + 
-    df_decision_vars_ess.loc['ess1',period].ess_disch_production +
-    df_decision_vars_ess.loc['ess1',period].ess_ch_production  >= total_demand, ctname)
+    df_decision_vars_ess.loc['ess1',period].ess_disch_production*efficiency +
+    df_decision_vars_ess.loc['ess1',period].ess_ch_production/efficiency  >= total_demand, ctname)
     # 所有機組的發電再加上儲能系統功率>= 負載功率
 #endregion
 
