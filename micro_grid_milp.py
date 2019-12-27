@@ -24,8 +24,8 @@ loadprofile= Series(loadprofile)
 net_loadprofile=loadprofile-pv_power
 #region 儲能系統參數
 
-NOMb = 100 #標稱電池容量,單位為MWh
-NOMbInit = 50 #初始標稱電池容量,單位為MWh
+NOMb = 100 #標稱電池容量,單位為kWh
+NOMbInit = 50 #初始標稱電池容量,單位為kWh
 SOCmin = 0.1 #電池充電狀態(最小)
 SOCmax =0.9
 SOC_final =0.8
@@ -59,7 +59,7 @@ all_units = ["diesel1"]
 ess_index = ["ess1"]
 ucp_raw_unit_data = {
         "energy": ["diesel"],
-        "initial" : [loadprofile[0]],
+        "initial" : [0],
         "min_gen": [35],
         "max_gen": [120],
         "operating_max_gen": [120],
@@ -211,13 +211,28 @@ for unit, r in df_decision_vars.groupby(level='units'): #對於不同的幾組�
 
 #ucpm.print_information()
 #endregion 
+#region Minimum uptime, downtime
+for unit, r in df_decision_vars.groupby(level='units'):
+    min_uptime   = df_up.min_uptime[unit]
+    min_downtime = df_up.min_downtime[unit]
+    # Note that r.turn_on and r.in_use are Series that can be indexed as arrays (ie: first item index = 0)
+    for t in range(min_uptime, nb_periods):
+        ctname = "min_up_{0!s}_{1}".format(*r.index[t])
+        ucpm.add_constraint(ucpm.sum(r.turn_on[(t - min_uptime) + 1:t + 1]) <= r.in_use[t], ctname)
+
+    for t in range(min_downtime, nb_periods):
+        ctname = "min_down_{0!s}_{1}".format(*r.index[t])
+        ucpm.add_constraint(ucpm.sum(r.turn_off[(t - min_downtime) + 1:t + 1]) <= 1 - r.in_use[t], ctname)
+#endregion
+
 #region soc變動限制，現在的電量會等於上個時刻的電量，加上功率流動
 '''  先把優化變數表格依照幾組分組 ，取出各個機組的規格 ，迭代相鄰的小時功率，設定限制條件 '''
 for ess_unit, r in df_decision_vars_ess.groupby(level='ess_unit'): #對於不同的幾組設定不同的限制
     ucpm.add_constraint(NOMb* r.ess_soc[0] - NOMbInit - r.ess_ch_production[0] / efficiency - r.ess_disch_production[0]*efficiency == 0) #初始化 
     for (p_ch_curr, p_disch_curr, soc_curr, soc_next) in zip(r.ess_ch_production,r.ess_disch_production,r.ess_soc, r.ess_soc[1:]): #從第二個到最後一個 
         ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next - p_ch_curr/efficiency - p_disch_curr*efficiency == 0)
-        #效率只能假設一個 
+        #效率只能假設一個  
+        
 #endregion 
 #region 電力供需平衡 
 # Enforcing demand 電力供需平衡 
@@ -307,4 +322,4 @@ ax.legend()
 #plt.plot(x,y)
 plt.show()
 #endregion 
-# fig, bx = plt.subplots(figsize=(10,10))
+
