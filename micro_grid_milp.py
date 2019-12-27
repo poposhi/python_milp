@@ -37,13 +37,10 @@ ESS_disch_cost=15#磨損成本係數 每MWh需要多少錢
 #endregion 
 #endregion 
 
-'''  '''
-#region 畫圖區域
-#fig, ax = plt.subplots(figsize=(10,10))
-
-#ax.plot(net_loadprofile,label='net_loadprofile')
 nb_periods = len(net_loadprofile)
-#endregion
+
+
+
 print("nb periods = {}".format(nb_periods))
 
 demand = Series(net_loadprofile, index = range(1, nb_periods+1))
@@ -123,10 +120,11 @@ production = ucpm.continuous_var_matrix(keys1=units, keys2=periods, name="p")
 
 #region 儲能係統優化變數 
     #同一個時間只能充電或是放電 
-charge_variable = ucpm.binary_var_matrix(keys1=ess, keys2=periods, name="charge_variable")
-discharge_variable = ucpm.binary_var_matrix(keys1=ess, keys2=periods, name="discharge_variable")
+charge_var = ucpm.binary_var_matrix(keys1=ess, keys2=periods, name="charge_var")
+discharge_var = ucpm.binary_var_matrix(keys1=ess, keys2=periods, name="discharge_var")
     #儲能系統功率 
-ess_production = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_production")
+ess_ch_production = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_ch_production")
+ess_disch_production = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_disch_production")
     #soc
 ess_soc = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_soc")
 #endregion 
@@ -137,7 +135,7 @@ ess_soc = ucpm.continuous_var_matrix(keys1=ess, keys2=periods, name="ess_soc")
 
 #region 把所有的優化變數在整合成一個表格，增加兩個index，機組名稱 與時間 每個基礎每個時間的優化變數  
 df_decision_vars = DataFrame({'in_use': in_use, 'turn_on': turn_on, 'turn_off': turn_off, 'production': production})
-df_decision_vars_ess =DataFrame({'charge_variable': charge_variable,'discharge_variable' : discharge_variable,'ess_production':ess_production,'ess_soc':ess_soc})
+df_decision_vars_ess =DataFrame({'charge_var': charge_var,'discharge_var' : discharge_var,'ess_ch_production' : ess_ch_production ,'ess_disch_production' : ess_disch_production,'ess_soc':ess_soc})
 # Set index names
 df_decision_vars.index.names=['units', 'periods']
 df_decision_vars_ess.index.names=['ess_unit', 'periods']
@@ -160,9 +158,13 @@ for item in df_join_decision_vars_up.itertuples(index=False):
     ucpm += (item.production >= item.min_gen * item.in_use)
     #這應該是限制式才對但是為什麼沒有
 for item in df_join_decision_vars_ess_minmax.itertuples(index=False):
-    ucpm += (item.ess_production <= item.max_gen * item.discharge_variable)
+    ucpm += (item.ess_disch_production <= item.max_gen * item.discharge_var)
+    ucpm += (item.ess_disch_production >= 0)
+    ucpm += (item.ess_ch_production >= item.min_gen * item.charge_var)
+    ucpm += (item.ess_ch_production <= 0)
     ucpm += (item.ess_soc >= SOCmin)
     ucpm += (item.ess_soc <= SOCmax)
+    ucpm += (item.charge_var + item.discharge_var <= 1 ) #同時間只會充電或是放電 
 #endregion 
 
 #region 初始狀態
@@ -190,10 +192,10 @@ for u in units:
         ucpm.add_constraint(turn_off[u, 1] == 0)
 #ucpm.print_information()
 #endregion 
+#region 升降載限制
 '''用groupby 對於每個機組每個小時  分組 並且取出這個機組的升降載限制 初始
 還有他們的輸出功率 
-
-  '''
+'''
 
 for unit, r in df_decision_vars.groupby(level='units'): #對於不同的幾組設定不同的限制 
     u_ramp_up = df_up.ramp_up[unit]
@@ -208,8 +210,16 @@ for unit, r in df_decision_vars.groupby(level='units'): #對於不同的幾組�
         ucpm.add_constraint(p_curr - p_next <= u_ramp_down) #每1個小時的 降載限制
 
 #ucpm.print_information()
-
-
+#endregion 
+#region soc變動限制，現在的電量會等於上個時刻的電量，加上功率流動
+'''  先把優化變數表格依照幾組分組 ，取出各個機組的規格 ，迭代相鄰的小時功率，設定限制條件 '''
+for ess_unit, r in df_decision_vars_ess.groupby(level='ess_unit'): #對於不同的幾組設定不同的限制
+    ucpm.add_constraint(NOMb* r.ess_soc[0] - NOMbInit - r.ess_ch_production[0] / efficiency - r.ess_disch_production[0]*efficiency == 0) #初始化 
+    for (p_ch_curr, p_disch_curr, soc_curr, soc_next) in zip(r.ess_ch_production,r.ess_disch_production,r.ess_soc, r.ess_soc[1:]): #從第二個到最後一個 
+        ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next - p_ch_curr/efficiency - p_disch_curr*efficiency == 0)
+        #效率只能假設一個 
+#endregion 
+#region 電力供需平衡 
 # Enforcing demand 電力供需平衡 
 # use a >= here to be more robust, 
 # objective will ensure efficient production
@@ -217,58 +227,84 @@ for period, r in df_decision_vars.groupby(level='periods'):
 
     total_demand = demand[period]
     ctname = "ct_meet_demand_%d" % period
-    ucpm.add_constraint(ucpm.sum(r.production)+df_decision_vars_ess.loc['ess1',period].ess_production >= total_demand, ctname)
+    #ucpm.add_constraint(ucpm.sum(r.production)+df_decision_vars_ess.loc['ess1',period].ess_production >= total_demand, ctname)
+    ucpm.add_constraint(ucpm.sum(r.production) + 
+    df_decision_vars_ess.loc['ess1',period].ess_disch_production +
+    df_decision_vars_ess.loc['ess1',period].ess_ch_production  >= total_demand, ctname)
+    # 所有機組的發電再加上儲能系統功率>= 負載功率
+#endregion
 
+#region 成本特性  設定目標函數 求解
 '''創建了一個新的表格 包含了成本特性  設定目標函數 最小化全部的成本加在一起 
 '''
 # Create a join between 'df_decision_vars' and 'df_up' Data Frames based on common index ids (ie: 'units')
 # In 'df_up', one keeps only relevant columns: 'fixed_cost', 'variable_cost', 'start_cost' and 'co2_cost'
 df_join_obj = df_decision_vars.join(
     df_up[['fixed_cost', 'variable_cost', 'start_cost', 'co2_cost']], how='inner')
+ess_unit = DataFrame(ucp_raw_ess_data, index=ess_index)
+ess_unit.index.names=['ess_unit'] 
+df_join_obj_ess = df_decision_vars_ess.join(
+    ess_unit[['variable_cost']], how='inner')
 
 # Display first few rows of joined Data Frame
 df_join_obj.head()
+df_join_obj_ess.head()
 
 # objective
 total_fixed_cost = ucpm.sum(df_join_obj.in_use * df_join_obj.fixed_cost) # 有在使用就會產生固定成本 
 total_variable_cost = ucpm.sum(df_join_obj.production * df_join_obj.variable_cost) #功率大小會影響變動成本 
 total_startup_cost = ucpm.sum(df_join_obj.turn_on * df_join_obj.start_cost) #啟動成本會跟啟動次數有關係 
 total_co2_cost = ucpm.sum(df_join_obj.production * df_join_obj.co2_cost) #
+
+total_ess_cost = ucpm.sum(df_join_obj_ess.ess_disch_production * df_join_obj_ess.variable_cost) #
 total_economic_cost = total_fixed_cost + total_variable_cost + total_startup_cost
 
 total_nb_used = ucpm.sum(df_decision_vars.in_use) #總共使用時間 
 total_nb_starts = ucpm.sum(df_decision_vars.turn_on) #總共開啟次數 
 
 # store expression kpis to retrieve them later.
-ucpm.add_kpi(total_fixed_cost   , "Total Fixed Cost")
-ucpm.add_kpi(total_variable_cost, "Total Variable Cost")
-ucpm.add_kpi(total_startup_cost , "Total Startup Cost")
-ucpm.add_kpi(total_economic_cost, "Total Economic Cost")
-ucpm.add_kpi(total_co2_cost     , "Total CO2 Cost")
-ucpm.add_kpi(total_nb_used, "Total #used")
-ucpm.add_kpi(total_nb_starts, "Total #starts")
+# ucpm.add_kpi(total_fixed_cost   , "Total Fixed Cost")
+# ucpm.add_kpi(total_variable_cost, "Total Variable Cost")
+# ucpm.add_kpi(total_startup_cost , "Total Startup Cost")
+# ucpm.add_kpi(total_economic_cost, "Total Economic Cost")
+# ucpm.add_kpi(total_co2_cost     , "Total CO2 Cost")
+# ucpm.add_kpi(total_nb_used, "Total #used")
+# ucpm.add_kpi(total_nb_starts, "Total #starts")
 
 # minimize sum of all costs
-ucpm.minimize(total_fixed_cost + total_variable_cost + total_startup_cost + total_co2_cost)
+ucpm.minimize(total_ess_cost+total_fixed_cost + total_variable_cost + total_startup_cost  + total_co2_cost)
 
 
 ucpm.print_information()
+#ucpm.parameters.optimalitytarget = 3
 assert ucpm.solve(), "!!! Solve of the model fails" #斷定解答一定存在不然就回傳字串 
 ucpm.report()
+#endregion
 
-#
+
 df_prods = df_decision_vars.production.apply(lambda v: max(0, v.solution_value)).unstack(level='units')
 df_used = df_decision_vars.in_use.apply(lambda v: max(0, v.solution_value)).unstack(level='units')
 df_started = df_decision_vars.turn_on.apply(lambda v: max(0, v.solution_value)).unstack(level='units')
+df_ess_disch_p =df_decision_vars_ess.ess_disch_production.apply(lambda v: max(0, v.solution_value)).unstack(level='ess_unit')
+df_ess_ch_p =df_decision_vars_ess.ess_ch_production.apply(lambda v: max(0, v.solution_value)).unstack(level='ess_unit')
+df_ess_soc =df_decision_vars_ess.ess_soc.apply(lambda v: max(0, v.solution_value)).unstack(level='ess_unit')
 
 
+#region 畫圖區域 
+fig, ax = plt.subplots(figsize=(10,10))
 # print(len(nb_periods))
-print(len(range(1, nb_periods+1)))
-print(len(df_prods))
+# print(len(range(1, nb_periods+1)))
+# print(len(df_prods))
+ax.plot(net_loadprofile,label='net_loadprofile')
 xx=range(nb_periods)
-ax.plot(df_prods,label='df_prodations')
+ax.plot(df_prods,label='production')
+ax.plot(df_ess_disch_p,label='df_ess_disch_p')
+ax.plot(df_ess_ch_p,label='df_ess_ch_p')
+ax.plot(df_ess_soc*100,label='df_ess_soc')
 ax.set_title('milp')
 # .bar(df_prods)
 ax.legend()
 #plt.plot(x,y)
 plt.show()
+#endregion 
+# fig, bx = plt.subplots(figsize=(10,10))
