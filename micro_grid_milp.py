@@ -25,7 +25,8 @@ net_loadprofile=loadprofile-pv_power
 #region 儲能系統參數
 
 NOMb = 100 #標稱電池容量,單位為kWh
-NOMbInit = 50 #初始標稱電池容量,單位為kWh
+NOMbInit = 40 #初始標稱電池容量,單位為kWh
+SOC_init =0.5
 SOCmin = 0.1 #電池充電狀態(最小)
 SOCmax =0.9
 SOC_final =0.8
@@ -74,8 +75,8 @@ ucp_raw_unit_data = {
 ucp_raw_ess_data = {
         "energy": ["ess"],
         "initial" : [0],
-        "min_gen": [-100],
-        "max_gen": [100],
+        "max_ch": [100],
+        "max_disch": [100],
         "operating_max_gen": [100],
         "min_uptime": [0],
         "min_downtime":[0],
@@ -149,7 +150,7 @@ df_decision_vars_ess.head()
 df_join_decision_vars_up = df_decision_vars.join(df_up[['min_gen', 'max_gen']], how='inner')
 df_join_decision_vars_up.head()
 #把電池上下功率限制 黏貼過來 
-df_join_decision_vars_ess_minmax = df_decision_vars_ess.join(ess_unit[['min_gen', 'max_gen']], how='inner')
+df_join_decision_vars_ess_minmax = df_decision_vars_ess.join(ess_unit[['max_ch', 'max_disch']], how='inner')
 df_join_decision_vars_ess_minmax.head()
 
 # 功率要在最大到最小之間  疊代每個行 INDEX If True 會回傳每行的第一個 疊代每一個機組的每一個小時  
@@ -158,18 +159,32 @@ for item in df_join_decision_vars_up.itertuples(index=False):
     ucpm += (item.production >= item.min_gen * item.in_use)
     #這應該是限制式才對但是為什麼沒有
 for item in df_join_decision_vars_ess_minmax.itertuples(index=False):
-    ucpm += (item.ess_disch_production <= item.max_gen * item.discharge_var)
+    ucpm += (item.ess_disch_production <= item.max_disch * item.discharge_var)
     ucpm += (item.ess_disch_production >= 0)
-    ucpm += (item.ess_ch_production >= item.min_gen * item.charge_var)
-    ucpm += (item.ess_ch_production <= 0)
+    ucpm += (item.ess_ch_production <= item.max_ch * item.charge_var)
+    ucpm += (item.ess_ch_production >= 0)
     ucpm += (item.ess_soc >= SOCmin)
     ucpm += (item.ess_soc <= SOCmax)
     ucpm += (item.charge_var + item.discharge_var <= 1 ) #同時間只會充電或是放電 
 #endregion 
+#region  Turn_on, turn_off 使用(In use)跟開關的關聯 
+# Use groupby operation to process each unit
+for unit, r in df_decision_vars.groupby(level='units'):
+    for (in_use_curr, in_use_next, turn_on_next, turn_off_next) in zip(r.in_use, r.in_use[1:], r.turn_on[1:], r.turn_off[1:]):
+        # if unit is off at time t and on at time t+1, then it was turned on at time t+1
+        ucpm.add_constraint(in_use_next - in_use_curr <= turn_on_next)
 
+        # if unit is on at time t and time t+1, then it was not turned on at time t+1
+        # mdl.add_constraint(in_use_next + in_use_curr + turn_on_next <= 2)
+
+        # if unit is on at time t and off at time t+1, then it was turned off at time t+1
+        ucpm.add_constraint(in_use_curr - in_use_next + turn_on_next == turn_off_next)
+ucpm.print_information()
+
+#endregion 
 #region 初始狀態
 '''
-    初始狀態   假如剛開始有功率 turn_on in_use =1
+初始狀態   假如剛開始有功率 turn_on in_use =1
 If initial production is nonzero, then period #1 is not a turn_on
 else turn_on equals in_use
 Dual logic is implemented for turn_off 
@@ -228,7 +243,7 @@ for unit, r in df_decision_vars.groupby(level='units'):
 #region soc變動限制，現在的電量會等於上個時刻的電量，加上功率流動
 '''  先把優化變數表格依照幾組分組 ，取出各個機組的規格 ，迭代相鄰的小時功率，設定限制條件 '''
 for ess_unit, r in df_decision_vars_ess.groupby(level='ess_unit'): #對於不同的幾組設定不同的限制
-    ucpm.add_constraint(NOMb* r.ess_soc[0] - NOMbInit - r.ess_ch_production[0] / efficiency - r.ess_disch_production[0]*efficiency == 0) #初始化 
+    ucpm.add_constraint(NOMbInit - NOMb* r.ess_soc[1]  - r.ess_ch_production[0] / efficiency - r.ess_disch_production[0]*efficiency == 0) #初始化 
     for (p_ch_curr, p_disch_curr, soc_curr, soc_next) in zip(r.ess_ch_production,r.ess_disch_production,r.ess_soc, r.ess_soc[1:]): #從第二個到最後一個 
         ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next - p_ch_curr/efficiency - p_disch_curr*efficiency == 0)
         #效率只能假設一個  
@@ -244,7 +259,7 @@ for period, r in df_decision_vars.groupby(level='periods'):
     ctname = "ct_meet_demand_%d" % period
     #ucpm.add_constraint(ucpm.sum(r.production)+df_decision_vars_ess.loc['ess1',period].ess_production >= total_demand, ctname)
     ucpm.add_constraint(ucpm.sum(r.production) + 
-    df_decision_vars_ess.loc['ess1',period].ess_disch_production*efficiency +
+    df_decision_vars_ess.loc['ess1',period].ess_disch_production*efficiency -
     df_decision_vars_ess.loc['ess1',period].ess_ch_production/efficiency  >= total_demand, ctname)
     # 所有機組的發電再加上儲能系統功率>= 負載功率
 #endregion
@@ -278,13 +293,14 @@ total_nb_used = ucpm.sum(df_decision_vars.in_use) #總共使用時間
 total_nb_starts = ucpm.sum(df_decision_vars.turn_on) #總共開啟次數 
 
 # store expression kpis to retrieve them later.
-# ucpm.add_kpi(total_fixed_cost   , "Total Fixed Cost")
-# ucpm.add_kpi(total_variable_cost, "Total Variable Cost")
-# ucpm.add_kpi(total_startup_cost , "Total Startup Cost")
+ucpm.add_kpi(total_ess_cost   , "total ess cost")
+ucpm.add_kpi(total_fixed_cost   , "Total Fixed Cost")
+ucpm.add_kpi(total_variable_cost, "Total Variable Cost")
+ucpm.add_kpi(total_startup_cost , "Total Startup Cost")
 # ucpm.add_kpi(total_economic_cost, "Total Economic Cost")
 # ucpm.add_kpi(total_co2_cost     , "Total CO2 Cost")
 # ucpm.add_kpi(total_nb_used, "Total #used")
-# ucpm.add_kpi(total_nb_starts, "Total #starts")
+ucpm.add_kpi(total_nb_starts, "Total #starts")
 
 # minimize sum of all costs
 ucpm.minimize(total_ess_cost+total_fixed_cost + total_variable_cost + total_startup_cost  + total_co2_cost)
