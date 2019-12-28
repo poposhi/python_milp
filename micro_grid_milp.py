@@ -24,7 +24,7 @@ loadprofile= Series(loadprofile)
 net_loadprofile=loadprofile-pv_power
 #region 儲能系統參數
 
-NOMb = 100 #標稱電池容量,單位為kWh
+NOMb = 300 #標稱電池容量,單位為kWh
 NOMbInit = 40 #初始標稱電池容量,單位為kWh
 SOC_init =0.5
 SOCmin = 0.1 #電池充電狀態(最小)
@@ -245,7 +245,7 @@ for unit, r in df_decision_vars.groupby(level='units'):
 for ess_unit, r in df_decision_vars_ess.groupby(level='ess_unit'): #對於不同的幾組設定不同的限制
     ucpm.add_constraint(NOMbInit - NOMb* r.ess_soc[1]  - r.ess_ch_production[0] / efficiency - r.ess_disch_production[0]*efficiency == 0) #初始化 
     for (p_ch_curr, p_disch_curr, soc_curr, soc_next) in zip(r.ess_ch_production,r.ess_disch_production,r.ess_soc, r.ess_soc[1:]): #從第二個到最後一個 
-        ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next - p_ch_curr/efficiency - p_disch_curr*efficiency == 0)
+        ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next + p_ch_curr/efficiency - p_disch_curr*efficiency == 0)
         #效率只能假設一個  
         
 #endregion 
@@ -330,7 +330,7 @@ ax.plot(net_loadprofile,label='net_loadprofile')
 xx=range(nb_periods)
 ax.plot(df_prods,label='production')
 ax.plot(df_ess_disch_p,label='df_ess_disch_p')
-ax.plot(df_ess_ch_p,label='df_ess_ch_p')
+ax.plot(-df_ess_ch_p,label='df_ess_ch_p')
 ax.plot(df_ess_soc*100,label='df_ess_soc')
 ax.set_title('milp')
 # .bar(df_prods)
