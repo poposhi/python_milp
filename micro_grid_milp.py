@@ -1,4 +1,4 @@
-
+#region  import
 # coding=utf-8
 import pandas as pd
 from pandas import DataFrame, Series
@@ -13,19 +13,20 @@ from docplex.mp.environment import Environment
 env = Environment()
 # env.print_information()
 from docplex.mp.model import Model
-
+#endregion 
 #region 設定負載與變數 參數
 ucpm = Model("ucp") #模型選擇經濟調度優化問題 The Unit Commitment Problem (UCP)
 
-loadprofile=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,150,92,85,78,66,53,42]
+loadprofile=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,109,92,85,78,66,53,42]
+load_small=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,109,60,20,30,10,10,15]
 pv_power_sun=[0,0,0,0,10,30,50,65,80,90,100,95,90,80,65,40,30,8,0,0,0,0,0,0]#晴天
 pv_power=Series(pv_power_sun)
 loadprofile= Series(loadprofile)
 net_loadprofile=loadprofile-pv_power
 #region 儲能系統參數
 
-NOMb = 300 #標稱電池容量,單位為kWh
-NOMbInit = 40 #初始標稱電池容量,單位為kWh
+NOMb = 100 #標稱電池容量,單位為kWh
+NOMbInit = 30 #初始標稱電池容量,單位為kWh
 SOC_init =0.5
 SOCmin = 0.1 #電池充電狀態(最小)
 SOCmax =0.9
@@ -42,10 +43,10 @@ nb_periods = len(net_loadprofile)
 
 
 
-print("nb periods = {}".format(nb_periods))
-
-demand = Series(net_loadprofile, index = range(1, nb_periods+1))
-
+# print("nb periods = {}".format(nb_periods))
+# print("pv_power_sun = {}".format(len(pv_power_sun) ))
+demand = Series(net_loadprofile, index = range(0, nb_periods))
+# print(demand)
 energies = ["coal", "gas", "diesel", "wind"]
 df_energy = DataFrame({"co2_cost": [30, 5, 15, 0]}, index=energies)
 
@@ -60,7 +61,7 @@ all_units = ["diesel1"]
 ess_index = ["ess1"]
 ucp_raw_unit_data = {
         "energy": ["diesel"],
-        "initial" : [0],
+        "initial" : [35],
         "min_gen": [35],
         "max_gen": [120],
         "operating_max_gen": [120],
@@ -69,7 +70,7 @@ ucp_raw_unit_data = {
         "ramp_up":   [120],
         "ramp_down": [120],
         "start_cost": [9990],
-        "fixed_cost": [77],
+        "fixed_cost": [0],
         "variable_cost": [20],
         }
 ucp_raw_ess_data = {
@@ -103,7 +104,7 @@ ess_unit.index.names=['ess_unit']
 units = all_units
 ess = ["ess1"]
 # 時間長度  range from 1 to nb_periods included
-periods = range(1, nb_periods+1) 
+periods = range(0, nb_periods) 
 #region 定義優化變數 
 # in use[u,t] is true iff unit u is in production at period t
 #定義2元(0或1)變數矩陣，輸入兩個index
@@ -255,7 +256,7 @@ for ess_unit, r in df_decision_vars_ess.groupby(level='ess_unit'): #對於不同
 # objective will ensure efficient production
 for period, r in df_decision_vars.groupby(level='periods'):
 
-    total_demand = demand[period]
+    total_demand = demand[period] #period 1 與load 1 相同
     ctname = "ct_meet_demand_%d" % period
     #ucpm.add_constraint(ucpm.sum(r.production)+df_decision_vars_ess.loc['ess1',period].ess_production >= total_demand, ctname)
     ucpm.add_constraint(ucpm.sum(r.production) + 
@@ -287,7 +288,7 @@ total_startup_cost = ucpm.sum(df_join_obj.turn_on * df_join_obj.start_cost) #啟
 total_co2_cost = ucpm.sum(df_join_obj.production * df_join_obj.co2_cost) #
 
 total_ess_cost = ucpm.sum(df_join_obj_ess.ess_disch_production * df_join_obj_ess.variable_cost) #
-total_economic_cost = total_fixed_cost + total_variable_cost + total_startup_cost
+total_economic_cost = total_fixed_cost + total_variable_cost + total_startup_cost + total_ess_cost
 
 total_nb_used = ucpm.sum(df_decision_vars.in_use) #總共使用時間 
 total_nb_starts = ucpm.sum(df_decision_vars.turn_on) #總共開啟次數 
@@ -297,13 +298,13 @@ ucpm.add_kpi(total_ess_cost   , "total ess cost")
 ucpm.add_kpi(total_fixed_cost   , "Total Fixed Cost")
 ucpm.add_kpi(total_variable_cost, "Total Variable Cost")
 ucpm.add_kpi(total_startup_cost , "Total Startup Cost")
-# ucpm.add_kpi(total_economic_cost, "Total Economic Cost")
-# ucpm.add_kpi(total_co2_cost     , "Total CO2 Cost")
+ucpm.add_kpi(total_economic_cost, "Total Economic Cost")
+ucpm.add_kpi(total_co2_cost     , "Total CO2 Cost")
 # ucpm.add_kpi(total_nb_used, "Total #used")
 ucpm.add_kpi(total_nb_starts, "Total #starts")
 
 # minimize sum of all costs
-ucpm.minimize(total_ess_cost+total_fixed_cost + total_variable_cost + total_startup_cost  + total_co2_cost)
+ucpm.minimize(total_economic_cost)
 
 
 ucpm.print_information()
@@ -319,20 +320,26 @@ df_started = df_decision_vars.turn_on.apply(lambda v: max(0, v.solution_value)).
 df_ess_disch_p =df_decision_vars_ess.ess_disch_production.apply(lambda v: max(0, v.solution_value)).unstack(level='ess_unit')
 df_ess_ch_p =df_decision_vars_ess.ess_ch_production.apply(lambda v: max(0, v.solution_value)).unstack(level='ess_unit')
 df_ess_soc =df_decision_vars_ess.ess_soc.apply(lambda v: max(0, v.solution_value)).unstack(level='ess_unit')
+# print(type(ucpm.objective_value))
 
-
+print(str(ucpm.objective_value))
+# print(type(df_ess_soc))
 #region 畫圖區域 
 fig, ax = plt.subplots(figsize=(10,10))
+ax.set_xticks(range(0, nb_periods))
+ax.set_yticks(range(-25,150,20))
 # print(len(nb_periods))
 # print(len(range(1, nb_periods+1)))
 # print(len(df_prods))
-ax.plot(net_loadprofile,label='net_loadprofile')
+ax.plot(demand,label='demand')
 xx=range(nb_periods)
 ax.plot(df_prods,label='production')
-ax.plot(df_ess_disch_p,label='df_ess_disch_p')
-ax.plot(-df_ess_ch_p,label='df_ess_ch_p')
-ax.plot(df_ess_soc*100,label='df_ess_soc')
-ax.set_title('milp')
+ess_power = df_ess_disch_p- df_ess_ch_p
+# ax.plot(df_ess_disch_p,label='ess_disch_p')
+# ax.plot(-df_ess_ch_p,label='ess_ch_p')
+ax.plot(ess_power,label='ess_power')
+ax.plot(df_ess_soc*100,label='ess_soc')
+ax.set_title('milp total_cost'+str(int (ucpm.objective_value)))
 # .bar(df_prods)
 ax.legend()
 #plt.plot(x,y)
