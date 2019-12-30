@@ -5,7 +5,7 @@ from pandas import DataFrame, Series
 import matplotlib.pyplot as plt
 from pylab import rcParams
 rcParams['figure.figsize'] = 20, 10 
-
+import numpy as np
 
 '''  顯示目前環境 創建一個 model'''
 import docplex
@@ -20,7 +20,9 @@ ucpm = Model("ucp") #模型選擇經濟調度優化問題 The Unit Commitment Pr
 loadprofile=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,109,92,85,78,66,53,42]
 load_small=[30,39,37,37,37,39,50,77,100,125,125,125,125,125,110,100,93,109,60,20,30,10,10,15]
 pv_power_sun=[0,0,0,0,10,30,50,65,80,90,100,95,90,80,65,40,30,8,0,0,0,0,0,0]#晴天
-pv_power=Series(pv_power_sun)
+pv_power_cloud=[0,0,0,0,10,30,30,50,30,20,80,20,40,50,30,20,10,0,0,0,0,0,0,0] #陰天
+pv_power = pv_power_cloud
+pv_power=Series(pv_power)
 loadprofile= Series(loadprofile)
 net_loadprofile=loadprofile-pv_power
 #region 儲能系統參數
@@ -63,7 +65,7 @@ ucp_raw_unit_data = {
         "energy": ["diesel"],
         "initial" : [35],
         "min_gen": [35],
-        "max_gen": [120],
+        "max_gen": [125],
         "operating_max_gen": [120],
         "min_uptime": [24],
         "min_downtime":[24],
@@ -244,9 +246,9 @@ for unit, r in df_decision_vars.groupby(level='units'):
 #region soc變動限制，現在的電量會等於上個時刻的電量，加上功率流動
 '''  先把優化變數表格依照幾組分組 ，取出各個機組的規格 ，迭代相鄰的小時功率，設定限制條件 '''
 for ess_unit, r in df_decision_vars_ess.groupby(level='ess_unit'): #對於不同的幾組設定不同的限制
-    ucpm.add_constraint(NOMbInit - NOMb* r.ess_soc[1]  - r.ess_ch_production[0] / efficiency - r.ess_disch_production[0]*efficiency == 0) #初始化 
+    ucpm.add_constraint(NOMbInit - NOMb* r.ess_soc[1]  - r.ess_ch_production[0] * efficiency - r.ess_disch_production[0]/efficiency == 0) #初始化 
     for (p_ch_curr, p_disch_curr, soc_curr, soc_next) in zip(r.ess_ch_production,r.ess_disch_production,r.ess_soc, r.ess_soc[1:]): #從第二個到最後一個 
-        ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next + p_ch_curr/efficiency - p_disch_curr*efficiency == 0)
+        ucpm.add_constraint(NOMb*soc_curr - NOMb*soc_next + p_ch_curr*efficiency - p_disch_curr/efficiency == 0)
         #效率只能假設一個  
         
 #endregion 
@@ -326,23 +328,33 @@ print(str(ucpm.objective_value))
 # print(type(df_ess_soc))
 #region 畫圖區域 
 fig, ax = plt.subplots(figsize=(10,10))
+ar=np.array([range(24)]).T
 ax.set_xticks(range(0, nb_periods))
 ax.set_yticks(range(-25,150,20))
 # print(len(nb_periods))
 # print(len(range(1, nb_periods+1)))
 # print(len(df_prods))
-ax.plot(demand,label='demand')
-xx=range(nb_periods)
-ax.plot(df_prods,label='production')
+# xx=range(nb_periods)
 ess_power = df_ess_disch_p- df_ess_ch_p
+print(type(demand))
+print(type(df_prods))
+print(type(df_prods['diesel1']))
+print(type(ess_power))
+
+ax.plot(demand,label='net_load')
+ax.plot(loadprofile,label='origin_load')
+ax.bar(np.arange(24),df_prods['diesel1'],0.2,color='orange',label='diesel1')
+
+ax.bar(np.arange(24)+0.2,ess_power['ess1'],0.2,color='blue',label='ess_power')
+ax.bar(np.arange(24)+0.4,pv_power_sun,0.2,color='red',label='pv_power')
+ax.plot(df_ess_soc['ess1']*100,label='soc')
+
+ax.set_title('milp total_cost '+str(int (ucpm.objective_value)))
+
+ax.legend()
+plt.show()
+
 # ax.plot(df_ess_disch_p,label='ess_disch_p')
 # ax.plot(-df_ess_ch_p,label='ess_ch_p')
-ax.plot(ess_power,label='ess_power')
-ax.plot(df_ess_soc*100,label='ess_soc')
-ax.set_title('milp total_cost'+str(int (ucpm.objective_value)))
-# .bar(df_prods)
-ax.legend()
-#plt.plot(x,y)
-plt.show()
 #endregion 
 

@@ -1,4 +1,5 @@
 # coding=utf-8
+import numpy as np
 import pandas as pd
 from pandas import DataFrame, Series
 import matplotlib.pyplot as plt
@@ -13,3 +14,9 @@ dd=DataFrame({'key1':[1,2,3,4],'key2':[2,2,3,4],'key3':[3,2,3,4]},index=ii)
 # print(dd.key1[1:]) #r.production[1:] 回傳一個表格 從第二個到最後一個 
 # print(dd.loc['a'])
 
+ar=np.array(range(24))
+print(ar.shape)
+
+
+ar=np.array([range(24)]).T
+print(ar.shape)
